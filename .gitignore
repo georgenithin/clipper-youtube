@@ -1,0 +1,22 @@
+# Environment & secrets
+.env
+.env.local
+
+# Local data directory (downloads, work files, outputs, SQLite DB)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Node / Next.js
+node_modules/
+frontend/.next/
+frontend/out/
+*.tsbuildinfo
+
+# OS
+.DS_Store

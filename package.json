@@ -1,0 +1,16 @@
+{
+  "name": "clipforge-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ClipForge local YouTube-to-short-form clip studio",
+  "scripts": {
+    "dev": "concurrently -n API,WEB -c cyan,magenta \"./backend/.venv/bin/uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 --reload\" \"npm --prefix frontend run dev\"",
+    "dev:backend": "./backend/.venv/bin/uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 --reload",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "update:yt-dlp": "./scripts/update-yt-dlp.sh",
+    "test:backend": "./backend/.venv/bin/pytest -v backend/tests"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

@@ -96,10 +96,10 @@ def _build_video_filter(
 
 def _encoder_args(encoder: str) -> list[str]:
     if encoder == "h264_videotoolbox":
-        return ["-c:v", "h264_videotoolbox", "-b:v", "6500k", "-maxrate", "9000k", "-pix_fmt", "yuv420p"]
+        return ["-c:v", "h264_videotoolbox", "-b:v", "4200k", "-maxrate", "5500k", "-pix_fmt", "yuv420p"]
     if encoder == "h264_nvenc":
-        return ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "21", "-pix_fmt", "yuv420p"]
-    return ["-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p"]
+        return ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "22", "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx264", "-preset", "medium", "-crf", "22", "-pix_fmt", "yuv420p"]
 
 
 def _run_ffmpeg(cmd: list[str], label: str) -> None:

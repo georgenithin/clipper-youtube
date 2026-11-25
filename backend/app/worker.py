@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import queue
+import shutil
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -13,9 +14,15 @@ from typing import Any, Optional
 
 from sqlmodel import select
 
+from app.config import DOWNLOADS_DIR
 from app.db import get_app_settings, get_session
 from app.models import Clip, Job, utcnow
 from app.services.pipeline import PipelineOptions, run_pipeline
+from app.services.storage import (
+    is_auto_clean_enabled,
+    is_supabase_enabled,
+    upload_clip_directory,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +186,26 @@ class JobWorker:
 
         try:
             result = run_pipeline(job_id=job_id, url=url, options=opts, progress=on_progress)
+
+            # Optional: offload rendered clips to Supabase Storage and clean local heavy files
+            if is_supabase_enabled() and result.clips:
+                all_uploaded = True
+                for idx, produced in enumerate(result.clips, start=1):
+                    on_progress(
+                        "metadata",
+                        round(95.0 + (idx / max(len(result.clips), 1)) * 4.0, 1),
+                        f"Uploading clip {idx}/{len(result.clips)} to Supabase Storage...",
+                    )
+                    if not upload_clip_directory(job_id, produced.clip_dir):
+                        all_uploaded = False
+                if all_uploaded and is_auto_clean_enabled():
+                    on_progress("metadata", 99.5, "Cleaning local source & rendered media to free disk space...")
+                    for produced in result.clips:
+                        for heavy in ("clip.mp4", "clip_nocaptions.mp4", "audio.mp3", "thumbnail.jpg"):
+                            (produced.clip_dir / heavy).unlink(missing_ok=True)
+                    dl_dir = DOWNLOADS_DIR / result.ingest.video_id
+                    if dl_dir.exists():
+                        shutil.rmtree(dl_dir, ignore_errors=True)
 
             with get_session() as session:
                 job = session.get(Job, job_id)

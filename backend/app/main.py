@@ -6,17 +6,18 @@ import asyncio
 import io
 import json
 import logging
+import os
 import shutil
 import time
 import uuid
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from sqlmodel import select
 
 from app.config import (
@@ -54,6 +55,15 @@ from app.services.checks import check_dependencies
 from app.services.ingest import IngestError, extract_video_id
 from app.services.metadata import save_metadata_files
 from app.services.render import RenderError, render_clip
+from app.services.storage import (
+    create_signed_url,
+    get_supabase_bucket,
+    is_auto_clean_enabled,
+    is_supabase_enabled,
+    iter_object_chunks,
+    upload_clip_directory,
+    upload_file,
+)
 from app.services.transcribe import WordTiming
 from app.worker import worker
 
@@ -79,12 +89,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_extra_origins = [
+    o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        *_extra_origins,
     ],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -319,22 +335,34 @@ def download_clip(
         clip = session.get(Clip, clip_id)
         if not clip:
             raise HTTPException(status_code=404, detail="Clip not found")
+        job_id = clip.job_id
         clip_dir = Path(clip.clip_dir)
         meta = json.loads(clip.metadata_json or "{}")
         rank = clip.rank
 
     fname, media_type, ext = DOWNLOAD_MAP[type]
     file_path = clip_dir / fname
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail=f"Requested asset ({type}) not found on disk")
 
     title = (meta.get("youtube_shorts") or {}).get("title") or f"clip_{rank:02d}"
     safe = sanitize_filename(f"clip_{rank:02d}_{title}", max_len=64)
     download_name = f"{safe}{ext}"
 
-    if inline:
-        return FileResponse(path=str(file_path), media_type=media_type)
-    return FileResponse(path=str(file_path), media_type=media_type, filename=download_name)
+    if file_path.exists():
+        if inline:
+            return FileResponse(path=str(file_path), media_type=media_type)
+        return FileResponse(path=str(file_path), media_type=media_type, filename=download_name)
+
+    if is_supabase_enabled():
+        object_path = f"{job_id}/{clip_dir.name}/{fname}"
+        signed = create_signed_url(
+            object_path,
+            expires_in=3600,
+            download_name=None if inline else download_name,
+        )
+        if signed:
+            return RedirectResponse(url=signed, status_code=307)
+
+    raise HTTPException(status_code=404, detail=f"Requested asset ({type}) not found locally or in Supabase Storage")
 
 
 class _StreamBuffer(io.RawIOBase):
@@ -374,7 +402,8 @@ def download_job_zip(job_id: str, req: ZipRequest):
     if not clips:
         raise HTTPException(status_code=400, detail="No clips selected for ZIP export.")
 
-    entries: list[tuple[Path, str]] = []
+    entries: list[tuple[Optional[Path], Optional[str], str]] = []
+    use_cloud = is_supabase_enabled()
     for clip in clips:
         cdir = Path(clip.clip_dir)
         meta = json.loads(clip.metadata_json or "{}")
@@ -383,26 +412,41 @@ def download_job_zip(job_id: str, req: ZipRequest):
         for fname in ("clip.mp4", "captions.srt", "thumbnail.jpg", "metadata.txt"):
             fpath = cdir / fname
             if fpath.exists():
-                entries.append((fpath, f"{folder}/{fname}"))
+                entries.append((fpath, None, f"{folder}/{fname}"))
+            elif use_cloud:
+                entries.append((None, f"{job_id}/{cdir.name}/{fname}", f"{folder}/{fname}"))
 
     if not entries:
-        raise HTTPException(status_code=404, detail="No clip files found on disk for ZIP export.")
+        raise HTTPException(status_code=404, detail="No clip files found for ZIP export.")
 
     def _zip_stream():
         stream = _StreamBuffer()
         with zipfile.ZipFile(stream, mode="w", compression=zipfile.ZIP_STORED) as zf:
-            for fpath, arcname in entries:
-                zinfo = zipfile.ZipInfo.from_file(fpath, arcname)
-                zinfo.compress_type = zipfile.ZIP_STORED
-                with zf.open(zinfo, "w") as dest, fpath.open("rb") as src:
-                    while True:
-                        chunk = src.read(256 * 1024)
-                        if not chunk:
-                            break
-                        dest.write(chunk)
-                        out = stream.drain()
-                        if out:
-                            yield out
+            for fpath, obj_path, arcname in entries:
+                if fpath is not None:
+                    zinfo = zipfile.ZipInfo.from_file(fpath, arcname)
+                    zinfo.compress_type = zipfile.ZIP_STORED
+                    with zf.open(zinfo, "w") as dest, fpath.open("rb") as src:
+                        while True:
+                            chunk = src.read(256 * 1024)
+                            if not chunk:
+                                break
+                            dest.write(chunk)
+                            out = stream.drain()
+                            if out:
+                                yield out
+                elif obj_path is not None:
+                    zinfo = zipfile.ZipInfo(arcname)
+                    zinfo.compress_type = zipfile.ZIP_STORED
+                    try:
+                        with zf.open(zinfo, "w") as dest:
+                            for chunk in iter_object_chunks(obj_path):
+                                dest.write(chunk)
+                                out = stream.drain()
+                                if out:
+                                    yield out
+                    except Exception as exc:
+                        logger.warning("Skipping missing cloud object %s in ZIP: %s", obj_path, exc)
                 out = stream.drain()
                 if out:
                     yield out
@@ -480,6 +524,8 @@ def rerender_single_clip(clip_id: str, req: RerenderRequest) -> dict[str, Any]:
         session.add(clip)
         session.commit()
         session.refresh(clip)
+        if is_supabase_enabled():
+            upload_clip_directory(clip.job_id, Path(clip.clip_dir))
         return serialize_clip(clip)
 
 
@@ -508,7 +554,11 @@ def update_clip_metadata(clip_id: str, req: UpdateMetadataRequest) -> dict[str, 
         session.commit()
         session.refresh(clip)
 
-        save_metadata_files(Path(clip.clip_dir), meta)
+        json_path, txt_path = save_metadata_files(Path(clip.clip_dir), meta)
+        if is_supabase_enabled():
+            folder = Path(clip.clip_dir).name
+            upload_file(json_path, f"{clip.job_id}/{folder}/metadata.json")
+            upload_file(txt_path, f"{clip.job_id}/{folder}/metadata.txt")
         return serialize_clip(clip)
 
 
@@ -528,6 +578,9 @@ def get_settings() -> dict[str, Any]:
         **settings,
         "gemini_key_configured": bool(get_gemini_api_key()),
         "gemini_model": GEMINI_MODEL,
+        "supabase_configured": is_supabase_enabled(),
+        "supabase_bucket": get_supabase_bucket(),
+        "supabase_auto_clean": is_auto_clean_enabled(),
         "storage_path": str(DATA_DIR),
         "scoring_weights": SCORING_WEIGHTS.as_dict(),
         "caption_presets": {k: v["label"] for k, v in CAPTION_PRESETS.items()},

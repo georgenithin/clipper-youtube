@@ -1,0 +1,10 @@
+backend/
+data/
+scripts/
+.env
+.env.local
+.venv/
+*.mp4
+*.wav
+*.mp3
+*.db

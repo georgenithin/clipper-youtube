@@ -8,6 +8,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      "ngrok-skip-browser-warning": "true",
       ...(init?.headers || {}),
     },
   });
@@ -70,7 +71,10 @@ export function clipDownloadUrl(
 export async function downloadJobZip(jobId: string, clipIds: string[]): Promise<void> {
   const res = await fetch(`${API_BASE}/api/jobs/${encodeURIComponent(jobId)}/zip`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "ngrok-skip-browser-warning": "true",
+    },
     body: JSON.stringify({ clip_ids: clipIds }),
   });
   if (!res.ok) {

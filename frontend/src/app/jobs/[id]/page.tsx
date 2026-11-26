@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import {
   downloadJobZip,
+  formatBytes,
   formatDuration,
   getJob,
   jobEventsUrl,
@@ -56,6 +57,12 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
   const [zipBusy, setZipBusy] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [rerenderTarget, setRerenderTarget] = useState<Clip | null>(null);
+  const [transferStats, setTransferStats] = useState<{
+    speedBps: number;
+    transferredBytes: number | null;
+    totalBytes: number | null;
+    mode: "download" | "upload";
+  } | null>(null);
 
   const loadJob = useCallback(async () => {
     try {
@@ -94,6 +101,16 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
               }
             : prev
         );
+        if (ev.speed_bps && ev.speed_bps > 0) {
+          setTransferStats({
+            speedBps: ev.speed_bps,
+            transferredBytes: ev.transferred_bytes ?? null,
+            totalBytes: ev.total_bytes ?? null,
+            mode: ev.transfer_mode === "upload" ? "upload" : "download",
+          });
+        } else if (ev.stage !== "downloading") {
+          setTransferStats(null);
+        }
         if (ev.log) {
           setLogs((prev) => [...prev.slice(-199), ev.log!]);
         }
@@ -245,9 +262,24 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
                 <p className="text-xs text-slate-400 capitalize">Stage: {job.stage}</p>
               </div>
             </div>
-            <span className="text-lg font-bold tabular-nums text-indigo-300">
-              {Math.round(job.progress)}%
-            </span>
+            <div className="flex items-center gap-3 shrink-0">
+              {transferStats && job.stage === "downloading" && (
+                <div className="inline-flex items-center gap-2 rounded-full border border-indigo-400/30 bg-indigo-500/15 px-3 py-1 text-xs font-mono text-indigo-200">
+                  <span className="font-semibold text-indigo-300">
+                    {transferStats.mode === "upload" ? "↑" : "↓"} {formatBytes(transferStats.speedBps)}/s
+                  </span>
+                  {transferStats.transferredBytes ? (
+                    <span className="text-slate-400">
+                      {formatBytes(transferStats.transferredBytes)}
+                      {transferStats.totalBytes ? ` / ${formatBytes(transferStats.totalBytes)}` : ""}
+                    </span>
+                  ) : null}
+                </div>
+              )}
+              <span className="text-lg font-bold tabular-nums text-indigo-300">
+                {Math.round(job.progress)}%
+              </span>
+            </div>
           </div>
 
           {/* Progress Bar */}

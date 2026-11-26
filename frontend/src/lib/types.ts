@@ -121,4 +121,8 @@ export interface SSEEvent {
   message: string;
   error?: string | null;
   log?: JobLogEntry;
+  speed_bps?: number | null;
+  transferred_bytes?: number | null;
+  total_bytes?: number | null;
+  transfer_mode?: "download" | "upload" | null;
 }

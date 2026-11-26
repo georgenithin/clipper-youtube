@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 from sqlmodel import select
 
-from app.config import DOWNLOADS_DIR
+from app.config import DOWNLOADS_DIR, is_relay_download_mode
 from app.db import get_app_settings, get_session
 from app.models import Clip, Job, utcnow
 from app.services.pipeline import PipelineOptions, run_pipeline
@@ -61,12 +61,24 @@ class JobWorker:
                 select(Job).where(Job.status.in_(["queued", "running"]))
             ).all()
             for job in pending:
-                job.status = "queued"
-                job.stage = "queued"
-                job.status_message = "Resuming after server restart..."
-                job.updated_at = utcnow()
-                session.add(job)
-                self._queue.put(job.id)
+                raw_opts = json.loads(job.options_json or "{}")
+                max_h = 720 if str(raw_opts.get("quality", "1080p")).startswith("720") else 1080
+                cached_ready = (DOWNLOADS_DIR / job.video_id / f"video_{max_h}p.mp4").exists() and (
+                    DOWNLOADS_DIR / job.video_id / "info.json"
+                ).exists()
+                if is_relay_download_mode() and not job.video_id.startswith("up_") and not cached_ready:
+                    job.status = "awaiting_upload"
+                    job.stage = "downloading"
+                    job.status_message = "Waiting for Mac downloader relay..."
+                    job.updated_at = utcnow()
+                    session.add(job)
+                else:
+                    job.status = "queued"
+                    job.stage = "queued"
+                    job.status_message = "Resuming after server restart..."
+                    job.updated_at = utcnow()
+                    session.add(job)
+                    self._queue.put(job.id)
             session.commit()
 
     def enqueue(self, job_id: str) -> None:

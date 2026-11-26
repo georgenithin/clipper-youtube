@@ -376,6 +376,10 @@ def relay_claim(
     job_id: str,
     message: str = Form("Downloading video on Mac..."),
     progress: float = Form(6.0),
+    speed_bps: Optional[float] = Form(default=None),
+    transferred_bytes: Optional[int] = Form(default=None),
+    total_bytes: Optional[int] = Form(default=None),
+    transfer_mode: Optional[str] = Form(default="download"),
     x_relay_secret: Optional[str] = Header(default=None),
 ) -> dict[str, Any]:
     _check_relay_auth(x_relay_secret)
@@ -400,9 +404,140 @@ def relay_claim(
             "stage": "downloading",
             "progress": progress,
             "message": message,
+            "speed_bps": speed_bps,
+            "transferred_bytes": transferred_bytes,
+            "total_bytes": total_bytes,
+            "transfer_mode": transfer_mode,
         },
     )
     return {"ok": True}
+
+
+@app.post("/api/relay/jobs/{job_id}/chunk")
+async def relay_upload_chunk(
+    job_id: str,
+    chunk_index: int = Form(...),
+    total_chunks: int = Form(...),
+    quality: str = Form("1080p"),
+    speed_bps: Optional[float] = Form(default=None),
+    transferred_bytes: Optional[int] = Form(default=None),
+    total_bytes: Optional[int] = Form(default=None),
+    file: UploadFile = File(...),
+    x_relay_secret: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    """Receive one 5 MB chunk of a relayed video (avoids proxy/timeout limits on large files)."""
+    _check_relay_auth(x_relay_secret)
+    with get_session() as session:
+        job = session.get(Job, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        video_id = job.video_id
+
+    max_h = 720 if str(quality).startswith("720") else 1080
+    video_dir = DOWNLOADS_DIR / video_id
+    video_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = video_dir / f"video_{max_h}p.tmp.mp4"
+
+    mode = "wb" if chunk_index == 0 else "ab"
+    data = await file.read()
+    try:
+        with tmp_path.open(mode) as out:
+            out.write(data)
+    except OSError as exc:
+        raise HTTPException(status_code=507, detail=f"Failed to write chunk: {exc}") from exc
+
+    pct = round(10.0 + ((chunk_index + 1) / max(total_chunks, 1)) * 6.0, 1)
+    speed_txt = f" · {speed_bps / (1024 * 1024):.2f} MB/s" if speed_bps and speed_bps > 0 else ""
+    msg = f"Mac relay: uploaded chunk {chunk_index + 1}/{total_chunks}{speed_txt}"
+    with get_session() as session:
+        job = session.get(Job, job_id)
+        if job:
+            job.status = "running"
+            job.stage = "downloading"
+            job.progress = pct
+            job.status_message = msg
+            job.updated_at = utcnow()
+            session.add(job)
+            session.commit()
+    worker.publish_event(
+        job_id,
+        {
+            "type": "progress",
+            "status": "running",
+            "stage": "downloading",
+            "progress": pct,
+            "message": msg,
+            "speed_bps": speed_bps,
+            "transferred_bytes": transferred_bytes,
+            "total_bytes": total_bytes,
+            "transfer_mode": "upload",
+        },
+    )
+    return {"ok": True, "chunk_index": chunk_index}
+
+
+@app.post("/api/relay/jobs/{job_id}/complete")
+def relay_upload_complete(
+    job_id: str,
+    info_json: str = Form("{}"),
+    quality: str = Form("1080p"),
+    x_relay_secret: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    """Finalize a chunked relay upload and enqueue Oracle processing."""
+    _check_relay_auth(x_relay_secret)
+    with get_session() as session:
+        job = session.get(Job, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        video_id = job.video_id
+
+    max_h = 720 if str(quality).startswith("720") else 1080
+    video_dir = DOWNLOADS_DIR / video_id
+    tmp_path = video_dir / f"video_{max_h}p.tmp.mp4"
+    final_path = video_dir / f"video_{max_h}p.mp4"
+    if not tmp_path.exists():
+        raise HTTPException(status_code=400, detail="No uploaded video chunks found on server.")
+    tmp_path.rename(final_path)
+
+    info: dict[str, Any] = {}
+    try:
+        info = json.loads(info_json or "{}")
+    except Exception:
+        info = {}
+    (video_dir / "info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
+
+    with get_session() as session:
+        job = session.get(Job, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if info.get("title"):
+            job.video_title = str(info["title"])
+        if info.get("channel") or info.get("uploader"):
+            job.channel = str(info.get("channel") or info.get("uploader"))
+        if info.get("duration"):
+            job.duration = float(info["duration"])
+        if info.get("thumbnail"):
+            job.thumbnail_url = str(info["thumbnail"])
+        job.status = "queued"
+        job.stage = "downloading"
+        job.progress = 16.0
+        job.status_message = "Uploaded from Mac — starting Oracle processing..."
+        job.updated_at = utcnow()
+        session.add(job)
+        session.commit()
+
+    worker.publish_event(
+        job_id,
+        {
+            "type": "progress",
+            "status": "running",
+            "stage": "downloading",
+            "progress": 16.0,
+            "message": "Uploaded from Mac — starting Oracle processing...",
+        },
+    )
+    worker.enqueue(job_id)
+    return {"ok": True, "job_id": job_id}
 
 
 @app.post("/api/relay/jobs/{job_id}/upload")

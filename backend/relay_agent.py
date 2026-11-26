@@ -56,13 +56,31 @@ def process_relay_job(client: httpx.Client, api_url: str, headers: dict[str, str
     if not yt_dlp:
         raise RuntimeError("yt-dlp not found on Mac.")
 
-    def _claim(msg: str, pct: float) -> None:
+    def _claim(
+        msg: str,
+        pct: float,
+        speed_bps: float | None = None,
+        transferred_bytes: int | None = None,
+        total_bytes: int | None = None,
+        transfer_mode: str = "download",
+    ) -> None:
+        payload: dict[str, str] = {
+            "message": msg,
+            "progress": str(round(pct, 1)),
+            "transfer_mode": transfer_mode,
+        }
+        if speed_bps is not None:
+            payload["speed_bps"] = str(round(speed_bps, 1))
+        if transferred_bytes is not None:
+            payload["transferred_bytes"] = str(int(transferred_bytes))
+        if total_bytes is not None:
+            payload["total_bytes"] = str(int(total_bytes))
         try:
             client.post(
                 f"{api_url}/api/relay/jobs/{job_id}/claim",
                 headers=headers,
-                data={"message": msg, "progress": str(pct)},
-                timeout=20.0,
+                data=payload,
+                timeout=15.0,
             )
         except Exception:
             pass
@@ -117,14 +135,79 @@ def process_relay_job(client: httpx.Client, api_url: str, headers: dict[str, str
                 f"bestvideo[height<={max_height}]+bestaudio/"
                 f"best[height<={max_height}]"
             )
-            dl_res = _run_ytdlp_with_cookies(
-                yt_dlp,
-                ["--no-playlist", "--no-warnings", "-f", fmt, "--merge-output-format", "mp4", "-o", out_tmpl],
-                canonical_url,
-                timeout=1800,
-            )
-            if dl_res.returncode != 0:
-                _fail(_map_ytdlp_error(dl_res.stderr or dl_res.stdout))
+            # Stream yt-dlp progress so we report real-time MB/s to the dashboard
+            js_args = ["--js-runtimes", "node"] if find_executable("node") else []
+            dl_ok = False
+            dl_err = ""
+            for c_args in get_yt_dlp_cookie_candidates():
+                cmd = [
+                    yt_dlp,
+                    *js_args,
+                    *c_args,
+                    "--no-playlist",
+                    "--no-warnings",
+                    "--newline",
+                    "--progress-template",
+                    "download:CF_PROG|%(progress.speed)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s",
+                    "-f",
+                    fmt,
+                    "--merge-output-format",
+                    "mp4",
+                    "-o",
+                    out_tmpl,
+                    canonical_url,
+                ]
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+                last_push = 0.0
+                err_lines: list[str] = []
+                assert proc.stdout is not None
+                for raw_line in proc.stdout:
+                    line = raw_line.strip()
+                    if line.startswith("CF_PROG|"):
+                        now = time.monotonic()
+                        if now - last_push >= 1.2:
+                            parts = line.split("|")
+                            try:
+                                spd = float(parts[1]) if parts[1] not in ("NA", "None", "") else 0.0
+                            except ValueError:
+                                spd = 0.0
+                            try:
+                                dl_b = int(float(parts[2])) if parts[2] not in ("NA", "None", "") else 0
+                            except ValueError:
+                                dl_b = 0
+                            tot_raw = parts[3] if parts[3] not in ("NA", "None", "") else parts[4]
+                            try:
+                                tot_b = int(float(tot_raw)) if tot_raw not in ("NA", "None", "") else 0
+                            except ValueError:
+                                tot_b = 0
+                            if spd > 0:
+                                last_push = now
+                                frac = (dl_b / tot_b) if tot_b > 0 else 0.0
+                                pct = 5.0 + min(frac, 1.0) * 5.0
+                                spd_str = f"{spd / (1024 * 1024):.2f} MB/s" if spd >= 1024 * 1024 else f"{spd / 1024:.0f} KB/s"
+                                _claim(
+                                    f"Mac relay: downloading '{title[:36]}' · {spd_str}",
+                                    pct,
+                                    speed_bps=spd,
+                                    transferred_bytes=dl_b,
+                                    total_bytes=tot_b or None,
+                                    transfer_mode="download",
+                                )
+                    elif line:
+                        err_lines.append(line)
+                proc.wait()
+                if proc.returncode == 0:
+                    dl_ok = True
+                    break
+                dl_err = "\n".join(err_lines[-10:])
+            if not dl_ok:
+                _fail(_map_ytdlp_error(dl_err))
                 return
 
             mp4s = sorted(tmp_dir.glob("video*.mp4")) or sorted(tmp_dir.glob("video.*"))
@@ -133,9 +216,63 @@ def process_relay_job(client: httpx.Client, api_url: str, headers: dict[str, str
                 return
 
             video_file = mp4s[0]
-            size_mb = video_file.stat().st_size / (1024 * 1024)
-            logger.info("[%s] Uploading %.1f MB to Oracle Cloud (%s)...", job_id, size_mb, api_url)
-            _claim(f"Mac relay: uploading {size_mb:.1f} MB to Oracle Cloud...", 12.0)
+            total_bytes = video_file.stat().st_size
+            size_mb = total_bytes / (1024 * 1024)
+            chunk_size = 5 * 1024 * 1024  # 5 MB chunks (proxy-safe + retryable)
+            total_chunks = max(1, (total_bytes + chunk_size - 1) // chunk_size)
+            logger.info(
+                "[%s] Uploading %.1f MB in %d chunks to Oracle Cloud (%s)...",
+                job_id,
+                size_mb,
+                total_chunks,
+                api_url,
+            )
+            _claim(f"Mac relay: uploading {size_mb:.1f} MB ({total_chunks} chunks) to Oracle...", 10.0)
+
+            uploaded_so_far = 0
+            last_speed_bps: float | None = None
+            with video_file.open("rb") as f:
+                for idx in range(total_chunks):
+                    chunk_bytes = f.read(chunk_size)
+                    if not chunk_bytes:
+                        break
+                    last_err = ""
+                    sent = False
+                    for attempt in range(1, 5):
+                        t0 = time.monotonic()
+                        try:
+                            form_data = {
+                                "chunk_index": str(idx),
+                                "total_chunks": str(total_chunks),
+                                "quality": f"{max_height}p",
+                                "transferred_bytes": str(uploaded_so_far + len(chunk_bytes)),
+                                "total_bytes": str(total_bytes),
+                            }
+                            if last_speed_bps is not None:
+                                form_data["speed_bps"] = str(round(last_speed_bps, 1))
+                            resp = client.post(
+                                f"{api_url}/api/relay/jobs/{job_id}/chunk",
+                                headers=headers,
+                                files={"file": ("chunk.bin", chunk_bytes, "application/octet-stream")},
+                                data=form_data,
+                                timeout=httpx.Timeout(connect=30.0, read=60.0, write=120.0, pool=30.0),
+                            )
+                            if resp.status_code == 200:
+                                elapsed = max(time.monotonic() - t0, 0.05)
+                                last_speed_bps = len(chunk_bytes) / elapsed
+                                uploaded_so_far += len(chunk_bytes)
+                                sent = True
+                                break
+                            last_err = f"HTTP {resp.status_code}: {resp.text[:160]}"
+                        except Exception as exc:
+                            last_err = str(exc)
+                        logger.warning("[%s] Chunk %d/%d attempt %d failed (%s); retrying...", job_id, idx + 1, total_chunks, attempt, last_err)
+                        time.sleep(attempt * 2)
+                    if not sent:
+                        _fail(f"Oracle chunk {idx + 1}/{total_chunks} upload failed: {last_err}")
+                        return
+                    spd_mb = (last_speed_bps or 0.0) / (1024 * 1024)
+                    logger.info("[%s] Uploaded chunk %d/%d (%.0f%%) at %.2f MB/s", job_id, idx + 1, total_chunks, ((idx + 1) / total_chunks) * 100, spd_mb)
 
             # Keep only essential metadata fields (including heatmap!) so form field stays small
             slim_info = {
@@ -148,22 +285,20 @@ def process_relay_job(client: httpx.Client, api_url: str, headers: dict[str, str
                 "heatmap": info.get("heatmap") or [],
             }
 
-            with video_file.open("rb") as f:
-                up_resp = client.post(
-                    f"{api_url}/api/relay/jobs/{job_id}/upload",
-                    headers=headers,
-                    files={"file": (f"video_{max_height}p.mp4", f, "video/mp4")},
-                    data={
-                        "info_json": json.dumps(slim_info),
-                        "quality": f"{max_height}p",
-                    },
-                    timeout=httpx.Timeout(connect=30.0, read=120.0, write=1800.0, pool=30.0),
-                )
-            if up_resp.status_code != 200:
-                _fail(f"Oracle upload rejected ({up_resp.status_code}): {up_resp.text[:200]}")
+            done_resp = client.post(
+                f"{api_url}/api/relay/jobs/{job_id}/complete",
+                headers=headers,
+                data={
+                    "info_json": json.dumps(slim_info),
+                    "quality": f"{max_height}p",
+                },
+                timeout=30.0,
+            )
+            if done_resp.status_code != 200:
+                _fail(f"Oracle finalize failed ({done_resp.status_code}): {done_resp.text[:200]}")
                 return
 
-            logger.info("[%s] Uploaded to Oracle! Local temp file deleted automatically.", job_id)
+            logger.info("[%s] Upload complete! Oracle is now processing. Temp file deleted.", job_id)
     except Exception as exc:
         _fail(f"Mac relay error: {exc}")
 

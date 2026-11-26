@@ -1,0 +1,36 @@
+services:
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    container_name: clipforge-backend
+    restart: unless-stopped
+    env_file:
+      - ../../.env
+    environment:
+      - CLIPFORGE_DATA_DIR=/app/data
+      - YT_DLP_COOKIES_FROM_BROWSER=
+    volumes:
+      - ../../data:/app/data
+    expose:
+      - "8000"
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: clipforge-caddy
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      - CLIPFORGE_DOMAIN=${CLIPFORGE_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

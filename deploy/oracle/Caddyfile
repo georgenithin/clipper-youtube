@@ -1,0 +1,7 @@
+{$CLIPFORGE_DOMAIN} {
+    encode gzip
+    reverse_proxy backend:8000 {
+        # Disable buffering so SSE (/api/jobs/{id}/events) streams in real time
+        flush_interval -1
+    }
+}

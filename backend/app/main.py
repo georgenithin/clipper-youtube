@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from sqlmodel import select
@@ -202,6 +202,89 @@ def create_job(req: CreateJobRequest) -> dict[str, Any]:
         session.refresh(job)
         data = serialize_job(job, clips=[])
 
+    worker.enqueue(job_id)
+    return data
+
+
+@app.post("/api/jobs/upload")
+async def create_upload_job(
+    file: UploadFile = File(...),
+    options: str = Form("{}"),
+    title: str = Form(""),
+) -> dict[str, Any]:
+    """Create a job from an uploaded video file (works without any YouTube access)."""
+    import subprocess
+
+    from app.config import MAX_DURATION_MINUTES
+    from app.models import JobOptionsIn
+    from app.services.checks import find_executable
+
+    try:
+        opts = JobOptionsIn.model_validate_json(options or "{}")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid options: {exc}") from exc
+    if opts.min_clip_sec >= opts.max_clip_sec:
+        raise HTTPException(status_code=400, detail="min_clip_sec must be less than max_clip_sec.")
+
+    uid = f"up_{uuid.uuid4().hex[:12]}"
+    video_dir = DOWNLOADS_DIR / uid
+    video_dir.mkdir(parents=True, exist_ok=True)
+    video_path = video_dir / "source.mp4"
+
+    try:
+        with video_path.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+    except OSError as exc:
+        shutil.rmtree(video_dir, ignore_errors=True)
+        raise HTTPException(status_code=507, detail=f"Could not save upload: {exc}") from exc
+
+    ffprobe = find_executable("ffprobe")
+    duration = 0.0
+    if ffprobe:
+        res = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(video_path)],
+            capture_output=True, text=True, timeout=60,
+        )
+        try:
+            duration = float(res.stdout.strip())
+        except ValueError:
+            duration = 0.0
+    if duration <= 0:
+        shutil.rmtree(video_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail="That file is not a readable video.")
+    if duration > MAX_DURATION_MINUTES * 60:
+        shutil.rmtree(video_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=f"Video exceeds the {MAX_DURATION_MINUTES}-minute limit.")
+
+    display_title = (title or "").strip() or Path(file.filename or "Uploaded video").stem
+    (video_dir / "info.json").write_text(
+        json.dumps({"title": display_title, "channel": "Uploaded file", "duration": duration}),
+        encoding="utf-8",
+    )
+
+    job_id = f"job_{uuid.uuid4().hex[:10]}"
+    job = Job(
+        id=job_id,
+        url=f"upload://{uid}",
+        video_id=uid,
+        video_title=display_title,
+        channel="Uploaded file",
+        duration=duration,
+        status="queued",
+        stage="queued",
+        status_message="Queued for processing",
+        options_json=opts.model_dump_json(),
+        logs_json="[]",
+    )
+    with get_session() as session:
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        data = serialize_job(job, clips=[])
     worker.enqueue(job_id)
     return data
 

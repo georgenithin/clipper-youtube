@@ -32,6 +32,37 @@ export function createJob(url: string, options: JobOptions): Promise<Job> {
   });
 }
 
+export function createUploadJob(
+  file: File,
+  options: JobOptions,
+  title: string,
+  onProgress?: (pct: number) => void
+): Promise<Job> {
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("options", JSON.stringify(options));
+    form.append("title", title);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${API_BASE}/api/jobs/upload`);
+    xhr.setRequestHeader("ngrok-skip-browser-warning", "true");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onload = () => {
+      try {
+        const body = JSON.parse(xhr.responseText || "{}");
+        if (xhr.status >= 200 && xhr.status < 300) resolve(body as Job);
+        else reject(new Error(body?.detail || `Upload failed (${xhr.status})`));
+      } catch {
+        reject(new Error(`Upload failed (${xhr.status})`));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Upload failed — could not reach the backend"));
+    xhr.send(form);
+  });
+}
+
 export function listJobs(): Promise<Job[]> {
   return apiFetch<Job[]>("/api/jobs");
 }

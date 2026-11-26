@@ -56,6 +56,11 @@ def extract_video_id(url: str) -> str:
     raw = (url or "").strip()
     if not raw:
         raise IngestError("Please enter a YouTube URL.")
+    if raw.startswith("upload://"):
+        uid = raw[len("upload://"):]
+        if not re.match(r"^up_[a-f0-9]{8,32}$", uid):
+            raise IngestError("Invalid uploaded-file reference.")
+        return uid
     if not raw.startswith(("http://", "https://")):
         raw = "https://" + raw
 
@@ -153,6 +158,8 @@ def ingest_video(
     """Fetch metadata/heatmap, download MP4 (cached), and extract 16kHz mono WAV (cached)."""
     ensure_data_dirs()
     video_id = extract_video_id(url)
+    if video_id.startswith("up_"):
+        return _ingest_uploaded(video_id, max_duration_minutes, progress)
     canonical_url = f"https://www.youtube.com/watch?v={video_id}"
 
     yt_dlp = find_executable("yt-dlp")
@@ -172,6 +179,7 @@ def ingest_video(
 
     cookie_candidates = get_yt_dlp_cookie_candidates()
     active_cookie_args: list[str] = cookie_candidates[0]
+    js_runtime_args = ["--js-runtimes", "node"] if find_executable("node") else []
 
     # 1. Fetch or load cached metadata
     info: dict[str, Any]
@@ -186,6 +194,7 @@ def ingest_video(
         for c_args in cookie_candidates:
             cmd = [
                 yt_dlp,
+                *js_runtime_args,
                 *c_args,
                 "--dump-single-json",
                 "--no-playlist",
@@ -250,6 +259,7 @@ def ingest_video(
         for c_args in dl_order:
             cmd = [
                 yt_dlp,
+                *js_runtime_args,
                 *c_args,
                 "--no-playlist",
                 "--no-warnings",
@@ -330,4 +340,72 @@ def ingest_video(
         height=height,
         fps=fps,
         has_youtube_captions=has_yt_captions,
+    )
+
+
+def _ingest_uploaded(
+    video_id: str,
+    max_duration_minutes: int,
+    progress: ProgressFn = None,
+) -> IngestResult:
+    """Ingest a user-uploaded video file (no YouTube access needed)."""
+    ffmpeg = find_executable("ffmpeg")
+    ffprobe = find_executable("ffprobe")
+    if not ffmpeg or not ffprobe:
+        raise IngestError("Missing ffmpeg/ffprobe on the server.")
+
+    video_dir = DOWNLOADS_DIR / video_id
+    info_path = video_dir / "info.json"
+    video_path = video_dir / "source.mp4"
+    audio_wav_path = video_dir / "audio_16k.wav"
+
+    if not info_path.exists() or not video_path.exists():
+        raise IngestError(
+            "The uploaded source file is no longer on the server (it was cleaned up). Please upload it again."
+        )
+
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    duration = float(info.get("duration") or 0.0)
+    if duration <= 0:
+        raise IngestError("Could not determine the uploaded video's duration.")
+    if duration > max_duration_minutes * 60:
+        raise IngestError(
+            f"Video is {duration / 60:.1f} minutes long, exceeding the {max_duration_minutes}-minute limit."
+        )
+
+    if progress:
+        progress("downloading", 10.0, "Using uploaded video file")
+
+    if not (audio_wav_path.exists() and audio_wav_path.stat().st_size > 0):
+        if progress:
+            progress("downloading", 15.0, "Extracting 16 kHz mono WAV for analysis...")
+        tmp_wav = video_dir / "audio_16k.tmp.wav"
+        res = subprocess.run(
+            [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(video_path),
+             "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(tmp_wav)],
+            capture_output=True, text=True, timeout=900,
+        )
+        if res.returncode != 0 or not tmp_wav.exists():
+            tmp_wav.unlink(missing_ok=True)
+            raise IngestError(f"ffmpeg failed to extract audio: {res.stderr.strip()}")
+        tmp_wav.rename(audio_wav_path)
+    if progress:
+        progress("downloading", 20.0, "Audio extraction complete")
+
+    width, height, fps = _probe_video(ffprobe, video_path)
+    return IngestResult(
+        video_id=video_id,
+        url=f"upload://{video_id}",
+        title=str(info.get("title") or "Uploaded video"),
+        channel=str(info.get("channel") or "Uploaded file"),
+        duration=duration,
+        thumbnail_url="",
+        heatmap=[],
+        video_path=video_path,
+        audio_wav_path=audio_wav_path,
+        info_path=info_path,
+        width=width,
+        height=height,
+        fps=fps,
+        has_youtube_captions=False,
     )

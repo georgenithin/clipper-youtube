@@ -16,7 +16,7 @@ import {
   Trash2,
   Youtube,
 } from "lucide-react";
-import { createJob, deleteJob, formatDuration, getSettings, listJobs } from "@/lib/api";
+import { createJob, createUploadJob, deleteJob, formatDuration, getSettings, listJobs } from "@/lib/api";
 import type { Job, JobOptions } from "@/lib/types";
 import { useToast } from "@/components/ToastProvider";
 
@@ -38,6 +38,9 @@ export default function HomePage() {
   const { toast } = useToast();
 
   const [url, setUrl] = useState("");
+  const [mode, setMode] = useState<"link" | "file">("link");
+  const [file, setFile] = useState<File | null>(null);
+  const [uploadPct, setUploadPct] = useState(0);
   const [options, setOptions] = useState<JobOptions>(DEFAULT_OPTIONS);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -80,6 +83,28 @@ export default function HomePage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (mode === "file") {
+      if (!file) {
+        toast("Choose a video file first", "error");
+        return;
+      }
+      setSubmitting(true);
+      setUploadPct(0);
+      try {
+        const job = await createUploadJob(
+          file,
+          { ...options, language: options.language?.trim() || null },
+          file.name.replace(/\.[^.]+$/, ""),
+          setUploadPct
+        );
+        toast("Upload complete! Opening live studio...", "success");
+        router.push(`/jobs/${job.id}`);
+      } catch (err) {
+        toast(err instanceof Error ? err.message : "Upload failed", "error");
+        setSubmitting(false);
+      }
+      return;
+    }
     if (!url.trim()) {
       toast("Paste a YouTube link first", "error");
       return;
@@ -133,8 +158,41 @@ export default function HomePage() {
         </div>
 
         <form onSubmit={handleSubmit} className="mx-auto mt-8 max-w-3xl space-y-4">
+          <div className="inline-flex rounded-lg border border-white/10 bg-[#090a0f] p-0.5 text-xs" role="tablist">
+            {(
+              [
+                ["link", "YouTube link"],
+                ["file", "Upload video file"],
+              ] as const
+            ).map(([k, label]) => (
+              <button
+                key={k}
+                type="button"
+                role="tab"
+                aria-selected={mode === k}
+                onClick={() => setMode(k)}
+                className={`rounded-md px-3 py-1.5 font-medium transition-colors ${
+                  mode === k ? "bg-white/12 text-white" : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <div className="flex flex-col sm:flex-row gap-2.5 rounded-2xl border border-white/12 bg-[#090a0f] p-2 shadow-inner focus-within:border-indigo-400/70 transition-colors">
-            <div className="flex flex-1 items-center gap-2.5 px-2.5">
+            {mode === "file" ? (
+              <div className="flex flex-1 items-center gap-2.5 px-2.5">
+                <Film className="h-5 w-5 text-indigo-400 shrink-0" />
+                <input
+                  type="file"
+                  accept="video/*,.mp4,.mov,.mkv,.webm"
+                  aria-label="Video file to upload"
+                  onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                  className="w-full py-2 text-sm text-slate-300 file:mr-3 file:rounded-lg file:border-0 file:bg-white/10 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-white"
+                />
+              </div>
+            ) : (
+              <div className="flex flex-1 items-center gap-2.5 px-2.5">
               <Youtube className="h-5 w-5 text-rose-500 shrink-0" />
               <input
                 type="url"
@@ -154,6 +212,7 @@ export default function HomePage() {
                 Paste
               </button>
             </div>
+            )}
             <button
               type="submit"
               disabled={submitting}
@@ -162,7 +221,7 @@ export default function HomePage() {
               {submitting ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  Starting...
+                  {mode === "file" && uploadPct > 0 ? `Uploading ${uploadPct}%` : "Starting..."}
                 </>
               ) : (
                 <>

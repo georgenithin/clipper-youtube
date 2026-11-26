@@ -1,8 +1,9 @@
 FROM python:3.11-slim
 
-# Install ffmpeg (with libass) and system libs for librosa/soundfile
+# Install ffmpeg (with libass), nodejs (JS runtime for yt-dlp EJS), and libsndfile1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    nodejs \
     libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 

@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from sqlmodel import select
@@ -30,6 +30,8 @@ from app.config import (
     WORK_DIR,
     ensure_data_dirs,
     get_gemini_api_key,
+    get_relay_secret,
+    is_relay_download_mode,
     sanitize_filename,
 )
 from app.db import (
@@ -184,15 +186,21 @@ def create_job(req: CreateJobRequest) -> dict[str, Any]:
     if req.options.min_clip_sec >= req.options.max_clip_sec:
         raise HTTPException(status_code=400, detail="min_clip_sec must be less than max_clip_sec.")
 
+    max_h = 720 if str(req.options.quality).startswith("720") else 1080
+    cached_ready = (DOWNLOADS_DIR / video_id / f"video_{max_h}p.mp4").exists() and (
+        DOWNLOADS_DIR / video_id / "info.json"
+    ).exists()
+    use_relay = is_relay_download_mode() and not video_id.startswith("up_") and not cached_ready
+
     job_id = f"job_{uuid.uuid4().hex[:10]}"
     job = Job(
         id=job_id,
         url=req.url.strip(),
         video_id=video_id,
-        status="queued",
-        stage="queued",
-        progress=0.0,
-        status_message="Queued for processing",
+        status="awaiting_upload" if use_relay else "queued",
+        stage="downloading" if use_relay else "queued",
+        progress=2.0 if use_relay else 0.0,
+        status_message="Waiting for Mac downloader relay..." if use_relay else "Queued for processing",
         options_json=req.options.model_dump_json(),
         logs_json="[]",
     )
@@ -202,7 +210,8 @@ def create_job(req: CreateJobRequest) -> dict[str, Any]:
         session.refresh(job)
         data = serialize_job(job, clips=[])
 
-    worker.enqueue(job_id)
+    if not use_relay:
+        worker.enqueue(job_id)
     return data
 
 
@@ -318,19 +327,188 @@ def retry_job(job_id: str) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail="Job not found")
         if job.status == "running":
             raise HTTPException(status_code=409, detail="Job is already running")
-        job.status = "queued"
-        job.stage = "queued"
-        job.progress = 0.0
+        raw_opts = json.loads(job.options_json or "{}")
+        max_h = 720 if str(raw_opts.get("quality", "1080p")).startswith("720") else 1080
+        cached_ready = (DOWNLOADS_DIR / job.video_id / f"video_{max_h}p.mp4").exists() and (
+            DOWNLOADS_DIR / job.video_id / "info.json"
+        ).exists()
+        use_relay = is_relay_download_mode() and not job.video_id.startswith("up_") and not cached_ready
+
+        job.status = "awaiting_upload" if use_relay else "queued"
+        job.stage = "downloading" if use_relay else "queued"
+        job.progress = 2.0 if use_relay else 0.0
         job.error_message = None
-        job.status_message = "Re-queued for processing"
+        job.status_message = (
+            "Waiting for Mac downloader relay..." if use_relay else "Re-queued for processing"
+        )
         job.updated_at = utcnow()
         session.add(job)
         session.commit()
         session.refresh(job)
         data = serialize_job(job, clips=[])
 
-    worker.enqueue(job_id)
+    if not use_relay:
+        worker.enqueue(job_id)
     return data
+
+
+# --- Mac Downloader Relay Endpoints ---
+
+
+def _check_relay_auth(x_relay_secret: Optional[str]) -> None:
+    expected = get_relay_secret()
+    if expected and (x_relay_secret or "").strip() != expected:
+        raise HTTPException(status_code=401, detail="Invalid relay secret")
+
+
+@app.get("/api/relay/pending")
+def relay_pending(x_relay_secret: Optional[str] = Header(default=None)) -> list[dict[str, Any]]:
+    _check_relay_auth(x_relay_secret)
+    with get_session() as session:
+        jobs = session.exec(
+            select(Job).where(Job.status == "awaiting_upload").order_by(Job.created_at.asc())  # type: ignore[arg-type]
+        ).all()
+        return [serialize_job(j, clip_count=0) for j in jobs]
+
+
+@app.post("/api/relay/jobs/{job_id}/claim")
+def relay_claim(
+    job_id: str,
+    message: str = Form("Downloading video on Mac..."),
+    progress: float = Form(6.0),
+    x_relay_secret: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    _check_relay_auth(x_relay_secret)
+    with get_session() as session:
+        job = session.get(Job, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if job.status not in ("awaiting_upload", "running"):
+            raise HTTPException(status_code=409, detail=f"Job is {job.status}")
+        job.status = "running"
+        job.stage = "downloading"
+        job.progress = progress
+        job.status_message = message
+        job.updated_at = utcnow()
+        session.add(job)
+        session.commit()
+    worker.publish_event(
+        job_id,
+        {
+            "type": "progress",
+            "status": "running",
+            "stage": "downloading",
+            "progress": progress,
+            "message": message,
+        },
+    )
+    return {"ok": True}
+
+
+@app.post("/api/relay/jobs/{job_id}/upload")
+async def relay_upload(
+    job_id: str,
+    file: UploadFile = File(...),
+    info_json: str = Form("{}"),
+    quality: str = Form("1080p"),
+    x_relay_secret: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    _check_relay_auth(x_relay_secret)
+    with get_session() as session:
+        job = session.get(Job, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        video_id = job.video_id
+
+    max_h = 720 if str(quality).startswith("720") else 1080
+    video_dir = DOWNLOADS_DIR / video_id
+    video_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = video_dir / f"video_{max_h}p.tmp.mp4"
+    final_path = video_dir / f"video_{max_h}p.mp4"
+
+    try:
+        with tmp_path.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+        tmp_path.rename(final_path)
+    except OSError as exc:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=507, detail=f"Failed to save relayed video: {exc}") from exc
+
+    info: dict[str, Any] = {}
+    try:
+        info = json.loads(info_json or "{}")
+    except Exception:
+        info = {}
+    (video_dir / "info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
+
+    with get_session() as session:
+        job = session.get(Job, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if info.get("title"):
+            job.video_title = str(info["title"])
+        if info.get("channel") or info.get("uploader"):
+            job.channel = str(info.get("channel") or info.get("uploader"))
+        if info.get("duration"):
+            job.duration = float(info["duration"])
+        if info.get("thumbnail"):
+            job.thumbnail_url = str(info["thumbnail"])
+        job.status = "queued"
+        job.stage = "downloading"
+        job.progress = 16.0
+        job.status_message = "Uploaded from Mac — starting Oracle processing..."
+        job.updated_at = utcnow()
+        session.add(job)
+        session.commit()
+
+    worker.publish_event(
+        job_id,
+        {
+            "type": "progress",
+            "status": "running",
+            "stage": "downloading",
+            "progress": 16.0,
+            "message": "Uploaded from Mac — starting Oracle processing...",
+        },
+    )
+    worker.enqueue(job_id)
+    return {"ok": True, "job_id": job_id}
+
+
+@app.post("/api/relay/jobs/{job_id}/fail")
+def relay_fail(
+    job_id: str,
+    error: str = Form("Mac downloader failed"),
+    x_relay_secret: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    _check_relay_auth(x_relay_secret)
+    with get_session() as session:
+        job = session.get(Job, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        job.status = "failed"
+        job.stage = "failed"
+        job.error_message = error
+        job.status_message = "Download failed on Mac"
+        job.updated_at = utcnow()
+        session.add(job)
+        session.commit()
+    worker.publish_event(
+        job_id,
+        {
+            "type": "failed",
+            "status": "failed",
+            "stage": "failed",
+            "progress": 0.0,
+            "message": error,
+            "error": error,
+        },
+    )
+    return {"ok": True}
 
 
 @app.get("/api/jobs/{job_id}/events")

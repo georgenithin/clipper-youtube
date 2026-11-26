@@ -74,9 +74,9 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
     loadJob();
   }, [loadJob]);
 
-  // Live SSE progress subscription while queued/running
+  // Live SSE progress subscription while awaiting_upload/queued/running
   useEffect(() => {
-    if (!job || (job.status !== "queued" && job.status !== "running")) return;
+    if (!job || (job.status !== "awaiting_upload" && job.status !== "queued" && job.status !== "running")) return;
 
     const es = new EventSource(jobEventsUrl(jobId));
     es.onmessage = (e) => {
@@ -235,7 +235,7 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
       </div>
 
       {/* Live Progress Stepper */}
-      {(job.status === "queued" || job.status === "running") && (
+      {(job.status === "awaiting_upload" || job.status === "queued" || job.status === "running") && (
         <section className="rounded-2xl border border-white/[0.08] bg-[#11131b] p-6 space-y-6">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">

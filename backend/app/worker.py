@@ -86,6 +86,9 @@ class JobWorker:
                 if not subs:
                     self._subscribers.pop(job_id, None)
 
+    def publish_event(self, job_id: str, event: dict[str, Any]) -> None:
+        self._publish(job_id, event)
+
     def _publish(self, job_id: str, event: dict[str, Any]) -> None:
         if not self._loop or self._loop.is_closed():
             return

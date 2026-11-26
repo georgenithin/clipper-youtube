@@ -76,7 +76,7 @@ export interface Job {
   channel: string;
   duration: number;
   thumbnail_url: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "awaiting_upload" | "queued" | "running" | "completed" | "failed";
   stage: string;
   progress: number;
   status_message: string;

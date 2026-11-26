@@ -167,3 +167,14 @@ def get_yt_dlp_cookie_candidates() -> list[list[str]]:
 def get_yt_dlp_cookie_args() -> list[str]:
     """Return the first configured yt-dlp cookie argument list."""
     return get_yt_dlp_cookie_candidates()[0]
+
+
+def is_relay_download_mode() -> bool:
+    """When True, Oracle waits for the Mac relay agent to download & upload YouTube videos."""
+    load_dotenv(PROJECT_ROOT / ".env", override=False)
+    return os.getenv("RELAY_DOWNLOAD_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_relay_secret() -> str:
+    load_dotenv(PROJECT_ROOT / ".env", override=False)
+    return os.getenv("RELAY_SECRET", "").strip()

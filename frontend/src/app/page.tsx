@@ -510,6 +510,7 @@ export default function HomePage() {
 
 function StatusBadge({ status }: { status: Job["status"] }) {
   const map: Record<Job["status"], string> = {
+    awaiting_upload: "bg-sky-500/15 text-sky-300 border-sky-500/25",
     completed: "bg-emerald-500/15 text-emerald-300 border-emerald-500/25",
     running: "bg-indigo-500/15 text-indigo-300 border-indigo-500/25",
     queued: "bg-amber-500/15 text-amber-300 border-amber-500/25",
@@ -517,7 +518,7 @@ function StatusBadge({ status }: { status: Job["status"] }) {
   };
   return (
     <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${map[status]}`}>
-      {status}
+      {status === "awaiting_upload" ? "mac relay" : status}
     </span>
   );
 }

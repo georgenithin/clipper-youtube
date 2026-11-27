@@ -99,7 +99,7 @@ def _encoder_args(encoder: str) -> list[str]:
         return ["-c:v", "h264_videotoolbox", "-b:v", "4200k", "-maxrate", "5500k", "-pix_fmt", "yuv420p"]
     if encoder == "h264_nvenc":
         return ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "22", "-pix_fmt", "yuv420p"]
-    return ["-c:v", "libx264", "-preset", "medium", "-crf", "22", "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p"]
 
 
 def _run_ffmpeg(cmd: list[str], label: str) -> None:

@@ -136,11 +136,12 @@ def run_pipeline(
     total = max(len(selected), 1)
 
     for rank, sel in enumerate(selected, start=1):
-        base_pct = 66.0 + ((rank - 1) / total) * 24.0
+        clip_span = 29.0 / total
+        render_pct = 66.0 + (rank - 1) * clip_span
         if progress:
             progress(
                 "rendering",
-                round(base_pct, 1),
+                round(render_pct, 1),
                 f"Rendering clip {rank}/{total} ({sel.start:.1f}s - {sel.end:.1f}s)...",
             )
 
@@ -167,7 +168,7 @@ def run_pipeline(
             denoise_audio=opts.denoise_audio,
         )
 
-        meta_pct = 90.0 + (rank / total) * 9.0
+        meta_pct = 66.0 + (rank - 0.2) * clip_span
         if progress:
             progress("metadata", round(meta_pct, 1), f"Generating metadata for clip {rank}/{total}...")
         metadata = generate_clip_metadata(

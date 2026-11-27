@@ -143,12 +143,12 @@ def compute_audio_energy_scores(
     try:
         import librosa  # type: ignore
 
-        y, sr = librosa.load(str(audio_wav_path), sr=16000, mono=True)
+        y, sr = librosa.load(str(audio_wav_path), sr=8000, mono=True)
         if y.size == 0:
             return [None] * len(windows), None, None
 
-        hop_length = 512
-        rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=hop_length)[0]
+        hop_length = 256
+        rms = librosa.feature.rms(y=y, frame_length=1024, hop_length=hop_length)[0]
         times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop_length)
         onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
 

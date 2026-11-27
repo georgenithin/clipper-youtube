@@ -11,6 +11,7 @@ import {
   Image as ImageIcon,
   Music,
   Save,
+  Send,
   Sliders,
   Sparkles,
   Subtitles,
@@ -25,6 +26,7 @@ interface ClipCardProps {
   selected: boolean;
   onToggleSelect: (clipId: string) => void;
   onOpenRerender: (clip: Clip) => void;
+  onOpenPublish: (clip: Clip) => void;
   onMetadataSaved: (clip: Clip) => void;
 }
 
@@ -35,6 +37,7 @@ export function ClipCard({
   selected,
   onToggleSelect,
   onOpenRerender,
+  onOpenPublish,
   onMetadataSaved,
 }: ClipCardProps) {
   const { toast } = useToast();
@@ -194,6 +197,26 @@ export function ClipCard({
                 <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
                   Standalone
                 </span>
+              )}
+              {clip.metadata.published?.youtube_url && (
+                <a
+                  href={clip.metadata.published.youtube_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-full bg-rose-500/15 px-2 py-0.5 text-[11px] font-medium text-rose-300 hover:underline"
+                >
+                  Posted YT ↗
+                </a>
+              )}
+              {clip.metadata.published?.instagram_url && (
+                <a
+                  href={clip.metadata.published.instagram_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-full bg-pink-500/15 px-2 py-0.5 text-[11px] font-medium text-pink-300 hover:underline"
+                >
+                  Posted IG ↗
+                </a>
               )}
             </div>
             <p className="text-xs leading-relaxed text-slate-300">{clip.llm_reason}</p>
@@ -392,14 +415,24 @@ export function ClipCard({
 
       {/* Footer Actions */}
       <div className="flex items-center justify-between gap-2 border-t border-white/[0.07] px-4 py-3">
-        <button
-          type="button"
-          onClick={() => onOpenRerender(clip)}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-white/[0.09] transition-colors"
-        >
-          <Sliders className="h-3.5 w-3.5 text-indigo-400" />
-          Trim / Re-render
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => onOpenRerender(clip)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:bg-white/[0.09] transition-colors"
+          >
+            <Sliders className="h-3.5 w-3.5 text-indigo-400" />
+            Trim
+          </button>
+          <button
+            type="button"
+            onClick={() => onOpenPublish(clip)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-rose-400/25 bg-rose-500/10 px-2.5 py-1.5 text-xs font-medium text-rose-200 hover:bg-rose-500/20 transition-colors"
+          >
+            <Send className="h-3.5 w-3.5 text-rose-400" />
+            Post
+          </button>
+        </div>
 
         <div className="relative">
           <button

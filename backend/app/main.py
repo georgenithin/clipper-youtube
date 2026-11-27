@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from sqlmodel import select
@@ -46,7 +46,9 @@ from app.models import (
     CleanupRequest,
     Clip,
     CreateJobRequest,
+    InstagramConfigRequest,
     Job,
+    PublishClipsRequest,
     RerenderRequest,
     UpdateMetadataRequest,
     UpdateSettingsRequest,
@@ -56,6 +58,16 @@ from app.models import (
 from app.services.checks import check_dependencies
 from app.services.ingest import IngestError, extract_video_id
 from app.services.metadata import save_metadata_files
+from app.services.publish import (
+    PublishError,
+    build_youtube_auth_url,
+    disconnect_youtube,
+    exchange_youtube_code,
+    get_publish_status,
+    publish_to_instagram_reels,
+    publish_to_youtube_shorts,
+    save_instagram_config,
+)
 from app.services.render import RenderError, render_clip
 from app.services.storage import (
     create_signed_url,
@@ -1048,3 +1060,117 @@ def cleanup_storage(req: CleanupRequest) -> dict[str, Any]:
         "freed_bytes": max(0, before - after),
         "remaining_bytes": after,
     }
+
+
+# --- Direct Publishing: YouTube Shorts & Instagram Reels ---
+
+
+@app.get("/api/publish/status")
+def publish_status() -> dict[str, Any]:
+    with get_session() as session:
+        return get_publish_status(session)
+
+
+@app.get("/api/auth/youtube/start")
+def youtube_oauth_start(return_to: str = Query(default="")):
+    try:
+        url = build_youtube_auth_url(state=return_to)
+    except PublishError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse(url=url, status_code=302)
+
+
+@app.get("/api/auth/youtube/callback")
+def youtube_oauth_callback(
+    code: Optional[str] = Query(default=None),
+    error: Optional[str] = Query(default=None),
+    state: str = Query(default=""),
+):
+    frontend_base = state.strip() or os.getenv("FRONTEND_URL", "https://clipper-youtube-trde.vercel.app").rstrip("/")
+    if error or not code:
+        return RedirectResponse(url=f"{frontend_base}/settings?youtube=error", status_code=302)
+    try:
+        with get_session() as session:
+            exchange_youtube_code(session, code)
+        return RedirectResponse(url=f"{frontend_base}/settings?youtube=connected", status_code=302)
+    except Exception as exc:
+        logger.warning("YouTube OAuth callback failed: %s", exc)
+        return RedirectResponse(url=f"{frontend_base}/settings?youtube=error", status_code=302)
+
+
+@app.post("/api/auth/youtube/disconnect")
+def youtube_disconnect() -> dict[str, Any]:
+    with get_session() as session:
+        disconnect_youtube(session)
+    return {"disconnected": True}
+
+
+@app.post("/api/publish/instagram/config")
+def instagram_save_config(req: InstagramConfigRequest) -> dict[str, Any]:
+    with get_session() as session:
+        return save_instagram_config(session, req.access_token, req.ig_user_id)
+
+
+@app.post("/api/publish")
+def publish_clips(req: PublishClipsRequest, request: Request) -> dict[str, Any]:
+    """Publish one or more selected clips to YouTube Shorts and/or Instagram Reels."""
+    if not req.clip_ids:
+        raise HTTPException(status_code=400, detail="Select at least one clip to publish.")
+    platforms = [p.lower() for p in req.platforms if p.lower() in ("youtube", "instagram")]
+    if not platforms:
+        raise HTTPException(status_code=400, detail="Select at least one platform (youtube or instagram).")
+
+    public_base = str(request.base_url).rstrip("/")
+    results: list[dict[str, Any]] = []
+
+    with get_session() as session:
+        for clip_id in req.clip_ids:
+            clip = session.get(Clip, clip_id)
+            if not clip:
+                results.append({"clip_id": clip_id, "ok": False, "error": "Clip not found"})
+                continue
+
+            meta = json.loads(clip.metadata_json or "{}")
+            published = meta.get("published") if isinstance(meta.get("published"), dict) else {}
+            clip_res: dict[str, Any] = {"clip_id": clip_id, "rank": clip.rank, "platforms": {}}
+
+            for plat in platforms:
+                try:
+                    if plat == "youtube":
+                        out = publish_to_youtube_shorts(
+                            session=session,
+                            job_id=clip.job_id,
+                            clip_dir=Path(clip.clip_dir),
+                            metadata=meta,
+                            privacy_status=req.privacy_status,
+                            use_nocaptions=req.use_nocaptions,
+                        )
+                        published["youtube_url"] = out["url"]
+                        clip_res["platforms"]["youtube"] = {"ok": True, **out}
+                    elif plat == "instagram":
+                        out = publish_to_instagram_reels(
+                            session=session,
+                            job_id=clip.job_id,
+                            clip_id=clip.id,
+                            clip_dir=Path(clip.clip_dir),
+                            metadata=meta,
+                            public_api_base=public_base,
+                            use_nocaptions=req.use_nocaptions,
+                        )
+                        published["instagram_url"] = out["url"]
+                        clip_res["platforms"]["instagram"] = {"ok": True, **out}
+                except PublishError as exc:
+                    clip_res["platforms"][plat] = {"ok": False, "error": str(exc)}
+                except Exception as exc:
+                    logger.exception("Unexpected publish error (%s, %s)", clip_id, plat)
+                    clip_res["platforms"][plat] = {"ok": False, "error": str(exc)}
+
+            meta["published"] = published
+            clip.metadata_json = json.dumps(meta, ensure_ascii=False)
+            clip.updated_at = utcnow()
+            session.add(clip)
+            session.commit()
+            clip_res["ok"] = all(v.get("ok") for v in clip_res["platforms"].values())
+            results.append(clip_res)
+
+    return {"results": results}

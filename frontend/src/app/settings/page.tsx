@@ -5,14 +5,25 @@ import {
   CheckCircle2,
   Cpu,
   HardDrive,
+  Instagram,
   KeyRound,
   Loader2,
   Save,
   Trash2,
   AlertCircle,
+  Youtube,
 } from "lucide-react";
-import { cleanupStorage, formatBytes, getSettings, updateSettings } from "@/lib/api";
-import type { SettingsResponse } from "@/lib/types";
+import {
+  cleanupStorage,
+  disconnectYoutube,
+  formatBytes,
+  getPublishStatus,
+  getSettings,
+  saveInstagramConfig,
+  updateSettings,
+  youtubeConnectUrl,
+} from "@/lib/api";
+import type { PublishStatus, SettingsResponse } from "@/lib/types";
 import { useToast } from "@/components/ToastProvider";
 
 export default function SettingsPage() {
@@ -27,14 +38,26 @@ export default function SettingsPage() {
   const [defaultCaptionStyle, setDefaultCaptionStyle] = useState("bold_yellow");
   const [autoDeleteDays, setAutoDeleteDays] = useState(30);
 
+  const [pubStatus, setPubStatus] = useState<PublishStatus | null>(null);
+  const [igUserId, setIgUserId] = useState("");
+  const [igToken, setIgToken] = useState("");
+  const [savingIg, setSavingIg] = useState(false);
+
   const load = async () => {
     try {
-      const data = await getSettings();
+      const [data, pub] = await Promise.all([
+        getSettings(),
+        getPublishStatus().catch(() => null),
+      ]);
       setSettings(data);
       setWhisperModel(data.whisper_model);
       setDefaultFormat(data.default_format);
       setDefaultCaptionStyle(data.default_caption_style);
       setAutoDeleteDays(data.auto_delete_days);
+      if (pub) {
+        setPubStatus(pub);
+        if (pub.instagram.ig_user_id) setIgUserId(pub.instagram.ig_user_id);
+      }
     } catch (err) {
       toast(err instanceof Error ? err.message : "Could not load settings", "error");
     } finally {
@@ -290,6 +313,128 @@ export default function SettingsPage() {
             Clean Up All + Clear Cache
           </button>
         </div>
+      </section>
+
+      {/* Social Publishing Accounts */}
+      <section className="rounded-2xl border border-white/[0.08] bg-[#11131b] p-6 space-y-5">
+        <div>
+          <h2 className="text-base font-semibold text-white">Social Publishing Accounts</h2>
+          <p className="text-xs text-slate-400">
+            Connect YouTube &amp; Instagram to post selected clips directly with their title, caption, and hashtags.
+          </p>
+        </div>
+
+        {/* YouTube OAuth */}
+        <div className="rounded-xl border border-white/[0.07] bg-[#0b0d14] p-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Youtube className="h-4 w-4 text-rose-500" />
+              <span className="text-sm font-semibold text-white">YouTube Shorts</span>
+            </div>
+            {pubStatus?.youtube.connected ? (
+              <div className="flex items-center gap-2">
+                <span className="rounded-full bg-emerald-500/15 px-2.5 py-0.5 text-xs font-medium text-emerald-300">
+                  {pubStatus.youtube.channel_title || "Connected"}
+                </span>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await disconnectYoutube();
+                    toast("Disconnected YouTube account", "info");
+                    load();
+                  }}
+                  className="rounded-lg border border-white/10 px-2.5 py-1 text-xs text-slate-300 hover:bg-white/10"
+                >
+                  Disconnect
+                </button>
+              </div>
+            ) : pubStatus?.youtube.oauth_configured ? (
+              <a
+                href={youtubeConnectUrl()}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-rose-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-400"
+              >
+                <Youtube className="h-3.5 w-3.5" />
+                Connect YouTube Account
+              </a>
+            ) : (
+              <span className="rounded-full bg-amber-500/15 px-2.5 py-0.5 text-xs text-amber-300">
+                Add YOUTUBE_CLIENT_ID &amp; SECRET in .env
+              </span>
+            )}
+          </div>
+          {pubStatus?.youtube.redirect_uri && (
+            <p className="text-[11px] text-slate-500 break-all">
+              Authorized Redirect URI:{" "}
+              <code className="text-slate-300">{pubStatus.youtube.redirect_uri}</code>
+            </p>
+          )}
+        </div>
+
+        {/* Instagram Graph API */}
+        <form
+          onSubmit={async (e) => {
+            e.preventDefault();
+            if (!igUserId.trim() || !igToken.trim()) {
+              toast("Enter both Instagram User ID and Access Token", "error");
+              return;
+            }
+            setSavingIg(true);
+            try {
+              await saveInstagramConfig(igToken.trim(), igUserId.trim());
+              setIgToken("");
+              toast("Instagram Reels account saved!", "success");
+              await load();
+            } catch (err) {
+              toast(err instanceof Error ? err.message : "Could not save Instagram config", "error");
+            } finally {
+              setSavingIg(false);
+            }
+          }}
+          className="rounded-xl border border-white/[0.07] bg-[#0b0d14] p-4 space-y-3"
+        >
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Instagram className="h-4 w-4 text-pink-400" />
+              <span className="text-sm font-semibold text-white">Instagram Reels</span>
+            </div>
+            {pubStatus?.instagram.connected ? (
+              <span className="rounded-full bg-emerald-500/15 px-2.5 py-0.5 text-xs font-medium text-emerald-300">
+                Connected ({pubStatus.instagram.ig_user_id})
+              </span>
+            ) : (
+              <span className="text-xs text-slate-500">Business / Creator account required</span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <input
+              type="text"
+              value={igUserId}
+              onChange={(e) => setIgUserId(e.target.value)}
+              placeholder="Instagram Account ID (numeric)"
+              aria-label="Instagram Account ID"
+              className="rounded-lg border border-white/10 bg-[#121520] px-3 py-2 text-xs text-white placeholder:text-slate-500"
+            />
+            <input
+              type="password"
+              value={igToken}
+              onChange={(e) => setIgToken(e.target.value)}
+              placeholder="Long-lived Meta Graph Access Token"
+              aria-label="Instagram Access Token"
+              className="rounded-lg border border-white/10 bg-[#121520] px-3 py-2 text-xs text-white placeholder:text-slate-500"
+            />
+          </div>
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              disabled={savingIg}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-pink-500/20 border border-pink-400/30 px-3 py-1.5 text-xs font-semibold text-pink-200 hover:bg-pink-500/30 disabled:opacity-50"
+            >
+              {savingIg ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+              Save Instagram Account
+            </button>
+          </div>
+        </form>
       </section>
     </div>
   );

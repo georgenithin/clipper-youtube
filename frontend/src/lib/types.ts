@@ -42,6 +42,10 @@ export interface ClipMetadata {
   };
   on_screen_hook?: string;
   alternative_titles?: string[];
+  published?: {
+    youtube_url?: string;
+    instagram_url?: string;
+  };
 }
 
 export interface Clip {
@@ -125,4 +129,31 @@ export interface SSEEvent {
   transferred_bytes?: number | null;
   total_bytes?: number | null;
   transfer_mode?: "download" | "upload" | null;
+}
+
+export interface PublishStatus {
+  youtube: {
+    oauth_configured: boolean;
+    connected: boolean;
+    channel_title: string | null;
+    redirect_uri: string;
+  };
+  instagram: {
+    connected: boolean;
+    ig_user_id: string | null;
+  };
+}
+
+export interface PublishPlatformOutcome {
+  ok: boolean;
+  url?: string;
+  error?: string;
+}
+
+export interface PublishClipResult {
+  clip_id: string;
+  rank?: number;
+  ok: boolean;
+  error?: string;
+  platforms?: Record<string, PublishPlatformOutcome>;
 }

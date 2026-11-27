@@ -12,6 +12,7 @@ import {
   ChevronUp,
   Loader2,
   RefreshCw,
+  Send,
   Square,
   Terminal,
 } from "lucide-react";
@@ -25,6 +26,7 @@ import {
 } from "@/lib/api";
 import type { Clip, Job, JobLogEntry, SSEEvent } from "@/lib/types";
 import { ClipCard } from "@/components/ClipCard";
+import { PublishModal } from "@/components/PublishModal";
 import { TrimRerenderModal } from "@/components/TrimRerenderModal";
 import { useToast } from "@/components/ToastProvider";
 
@@ -57,6 +59,7 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
   const [zipBusy, setZipBusy] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [rerenderTarget, setRerenderTarget] = useState<Clip | null>(null);
+  const [publishTargets, setPublishTargets] = useState<Clip[]>([]);
   const [transferStats, setTransferStats] = useState<{
     speedBps: number;
     transferredBytes: number | null;
@@ -398,6 +401,7 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
                 selected={selectedIds.has(clip.id)}
                 onToggleSelect={toggleSelect}
                 onOpenRerender={setRerenderTarget}
+                onOpenPublish={(c) => setPublishTargets([c])}
                 onMetadataSaved={handleClipUpdated}
               />
             ))}
@@ -415,7 +419,16 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
             <span>selected of {clips.length} clips</span>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={selectedIds.size === 0}
+              onClick={() => setPublishTargets(clips.filter((c) => selectedIds.has(c.id)))}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-rose-500 to-indigo-500 px-3.5 py-2 text-xs font-semibold text-white hover:from-rose-400 hover:to-indigo-400 disabled:opacity-40 transition-all shadow-lg"
+            >
+              <Send className="h-3.5 w-3.5" />
+              Post Selected
+            </button>
             <button
               type="button"
               disabled={selectedIds.size === 0 || zipBusy}
@@ -444,6 +457,14 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
         videoDuration={job.duration}
         onClose={() => setRerenderTarget(null)}
         onUpdated={handleClipUpdated}
+      />
+
+      {/* Publish to YouTube Shorts / Instagram Reels Modal */}
+      <PublishModal
+        clips={publishTargets}
+        open={publishTargets.length > 0}
+        onClose={() => setPublishTargets([])}
+        onPublished={() => loadJob()}
       />
     </div>
   );

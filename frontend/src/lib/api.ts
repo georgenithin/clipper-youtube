@@ -1,4 +1,12 @@
-import type { Clip, ClipMetadata, Job, JobOptions, SettingsResponse } from "./types";
+import type {
+  Clip,
+  ClipMetadata,
+  Job,
+  JobOptions,
+  PublishClipResult,
+  PublishStatus,
+  SettingsResponse,
+} from "./types";
 
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "http://localhost:8000";
@@ -178,6 +186,42 @@ export function cleanupStorage(payload: {
   clear_cache?: boolean;
 }): Promise<{ removed_jobs: number; freed_bytes: number; remaining_bytes: number }> {
   return apiFetch("/api/storage/cleanup", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getPublishStatus(): Promise<PublishStatus> {
+  return apiFetch<PublishStatus>("/api/publish/status");
+}
+
+export function youtubeConnectUrl(): string {
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const qs = origin ? `?return_to=${encodeURIComponent(origin)}` : "";
+  return `${API_BASE}/api/auth/youtube/start${qs}`;
+}
+
+export function disconnectYoutube(): Promise<{ disconnected: boolean }> {
+  return apiFetch("/api/auth/youtube/disconnect", { method: "POST" });
+}
+
+export function saveInstagramConfig(
+  access_token: string,
+  ig_user_id: string
+): Promise<{ connected: boolean; ig_user_id: string }> {
+  return apiFetch("/api/publish/instagram/config", {
+    method: "POST",
+    body: JSON.stringify({ access_token, ig_user_id }),
+  });
+}
+
+export function publishClips(payload: {
+  clip_ids: string[];
+  platforms: ("youtube" | "instagram")[];
+  privacy_status: "private" | "unlisted" | "public";
+  use_nocaptions: boolean;
+}): Promise<{ results: PublishClipResult[] }> {
+  return apiFetch("/api/publish", {
     method: "POST",
     body: JSON.stringify(payload),
   });

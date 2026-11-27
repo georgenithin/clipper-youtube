@@ -120,3 +120,15 @@ class UpdateSettingsRequest(BaseModel):
 class CleanupRequest(BaseModel):
     older_than_days: Optional[int] = PydField(default=None, ge=0, le=365)
     clear_cache: bool = False
+
+
+class InstagramConfigRequest(BaseModel):
+    access_token: str
+    ig_user_id: str
+
+
+class PublishClipsRequest(BaseModel):
+    clip_ids: list[str]
+    platforms: list[str]  # ["youtube", "instagram"]
+    privacy_status: str = PydField(default="private", pattern=r"^(private|unlisted|public)$")
+    use_nocaptions: bool = False

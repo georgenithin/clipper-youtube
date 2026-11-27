@@ -83,17 +83,57 @@ def get_instagram_config(session: Session) -> tuple[str, str]:
     return token, ig_user_id
 
 
+def _load_youtube_accounts(session: Session) -> list[dict[str, str]]:
+    """Load all connected YouTube channels, auto-migrating legacy single-account settings."""
+    raw = _get_setting(session, "youtube_accounts")
+    accounts: list[dict[str, str]] = []
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                accounts = [a for a in parsed if isinstance(a, dict) and a.get("refresh_token")]
+        except Exception:
+            accounts = []
+
+    if not accounts:
+        legacy_rt = _get_setting(session, "youtube_refresh_token")
+        if legacy_rt:
+            legacy_title = _get_setting(session, "youtube_channel_title") or "YouTube Channel"
+            accounts = [
+                {
+                    "id": "default",
+                    "channel_title": legacy_title,
+                    "thumbnail": "",
+                    "refresh_token": legacy_rt,
+                }
+            ]
+            _save_youtube_accounts(session, accounts)
+    return accounts
+
+
+def _save_youtube_accounts(session: Session, accounts: list[dict[str, str]]) -> None:
+    _set_setting(session, "youtube_accounts", json.dumps(accounts))
+
+
 def get_publish_status(session: Session) -> dict[str, Any]:
     client_id, client_secret, redirect_uri = get_youtube_oauth_config()
-    yt_refresh = _get_setting(session, "youtube_refresh_token")
-    yt_channel = _get_setting(session, "youtube_channel_title")
+    accounts = _load_youtube_accounts(session) if (client_id and client_secret) else []
+    public_accounts = [
+        {
+            "id": a.get("id", "default"),
+            "channel_title": a.get("channel_title") or "YouTube Channel",
+            "thumbnail": a.get("thumbnail") or "",
+        }
+        for a in accounts
+    ]
     ig_token, ig_user_id = get_instagram_config(session)
 
     return {
         "youtube": {
             "oauth_configured": bool(client_id and client_secret),
-            "connected": bool(yt_refresh and client_id and client_secret),
-            "channel_title": yt_channel or None,
+            "connected": len(public_accounts) > 0,
+            "channel_title": public_accounts[0]["channel_title"] if public_accounts else None,
+            "accounts": public_accounts,
             "redirect_uri": redirect_uri,
         },
         "instagram": {
@@ -115,7 +155,7 @@ def build_youtube_auth_url(state: str = "") -> str:
         "response_type": "code",
         "scope": YOUTUBE_SCOPES,
         "access_type": "offline",
-        "prompt": "consent",
+        "prompt": "select_account consent",
         "state": state,
     }
     return f"{YOUTUBE_AUTH_URL}?{urlencode(params)}"
@@ -142,14 +182,10 @@ def exchange_youtube_code(session: Session, code: str) -> dict[str, Any]:
         tokens = resp.json()
         access_token = tokens.get("access_token", "")
         refresh_token = tokens.get("refresh_token", "")
-        if not refresh_token:
-            refresh_token = _get_setting(session, "youtube_refresh_token")
-        if not refresh_token:
-            raise PublishError("Google did not return a refresh token. Try reconnecting and granting consent.")
 
-        _set_setting(session, "youtube_refresh_token", refresh_token)
-
-        channel_title = ""
+        channel_id = ""
+        channel_title = "YouTube Channel"
+        thumbnail = ""
         try:
             ch = client.get(
                 YOUTUBE_CHANNELS_URL,
@@ -159,17 +195,44 @@ def exchange_youtube_code(session: Session, code: str) -> dict[str, Any]:
             if ch.status_code == 200:
                 items = ch.json().get("items") or []
                 if items:
-                    channel_title = str(items[0].get("snippet", {}).get("title", ""))
+                    channel_id = str(items[0].get("id") or "")
+                    snip = items[0].get("snippet") or {}
+                    channel_title = str(snip.get("title") or channel_title)
+                    thumbnail = str((snip.get("thumbnails") or {}).get("default", {}).get("url") or "")
         except Exception:
             pass
-        if channel_title:
-            _set_setting(session, "youtube_channel_title", channel_title)
-        return {"connected": True, "channel_title": channel_title}
+
+        accounts = _load_youtube_accounts(session)
+        acc_id = channel_id or f"yt_{len(accounts) + 1}"
+        existing = next((a for a in accounts if a.get("id") == acc_id), None)
+        if not refresh_token and existing:
+            refresh_token = existing.get("refresh_token", "")
+        if not refresh_token:
+            raise PublishError("Google did not return a refresh token. Try reconnecting and granting consent.")
+
+        entry = {
+            "id": acc_id,
+            "channel_title": channel_title,
+            "thumbnail": thumbnail,
+            "refresh_token": refresh_token,
+        }
+        accounts = [a for a in accounts if a.get("id") != acc_id]
+        accounts.append(entry)
+        _save_youtube_accounts(session, accounts)
+        return {"connected": True, "id": acc_id, "channel_title": channel_title}
 
 
-def disconnect_youtube(session: Session) -> None:
-    _delete_setting(session, "youtube_refresh_token")
-    _delete_setting(session, "youtube_channel_title")
+def disconnect_youtube(session: Session, account_id: Optional[str] = None) -> None:
+    if account_id:
+        accounts = [a for a in _load_youtube_accounts(session) if a.get("id") != account_id]
+        _save_youtube_accounts(session, accounts)
+        if not accounts:
+            _delete_setting(session, "youtube_refresh_token")
+            _delete_setting(session, "youtube_channel_title")
+    else:
+        _delete_setting(session, "youtube_accounts")
+        _delete_setting(session, "youtube_refresh_token")
+        _delete_setting(session, "youtube_channel_title")
 
 
 def save_instagram_config(session: Session, access_token: str, ig_user_id: str) -> dict[str, Any]:
@@ -178,11 +241,16 @@ def save_instagram_config(session: Session, access_token: str, ig_user_id: str) 
     return {"connected": bool(access_token.strip() and ig_user_id.strip()), "ig_user_id": ig_user_id.strip()}
 
 
-def _refresh_youtube_access_token(session: Session) -> str:
+def _refresh_youtube_access_token(session: Session, account_id: Optional[str] = None) -> str:
     client_id, client_secret, _ = get_youtube_oauth_config()
-    refresh_token = _get_setting(session, "youtube_refresh_token")
-    if not client_id or not client_secret or not refresh_token:
+    accounts = _load_youtube_accounts(session)
+    if not client_id or not client_secret or not accounts:
         raise PublishError("YouTube account is not connected. Connect it in Settings first.")
+
+    target = next((a for a in accounts if a.get("id") == account_id), None) if account_id else accounts[0]
+    if not target:
+        raise PublishError("Selected YouTube channel was not found. Reconnect it in Settings.")
+    refresh_token = target["refresh_token"]
 
     with httpx.Client(timeout=30.0) as client:
         resp = client.post(
@@ -231,9 +299,10 @@ def publish_to_youtube_shorts(
     metadata: dict[str, Any],
     privacy_status: str = "private",
     use_nocaptions: bool = False,
+    account_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Upload a clip as a YouTube Short using YouTube Data API v3 resumable upload."""
-    access_token = _refresh_youtube_access_token(session)
+    access_token = _refresh_youtube_access_token(session, account_id=account_id)
     fname = "clip_nocaptions.mp4" if use_nocaptions else "clip.mp4"
     video_path, is_temp = _ensure_local_video(job_id, clip_dir, fname)
 

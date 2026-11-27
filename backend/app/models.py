@@ -132,3 +132,4 @@ class PublishClipsRequest(BaseModel):
     platforms: list[str]  # ["youtube", "instagram"]
     privacy_status: str = PydField(default="private", pattern=r"^(private|unlisted|public)$")
     use_nocaptions: bool = False
+    youtube_account_id: Optional[str] = None

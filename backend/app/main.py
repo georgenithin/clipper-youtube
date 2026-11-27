@@ -1099,9 +1099,9 @@ def youtube_oauth_callback(
 
 
 @app.post("/api/auth/youtube/disconnect")
-def youtube_disconnect() -> dict[str, Any]:
+def youtube_disconnect(account_id: Optional[str] = Query(default=None)) -> dict[str, Any]:
     with get_session() as session:
-        disconnect_youtube(session)
+        disconnect_youtube(session, account_id=account_id)
     return {"disconnected": True}
 
 
@@ -1144,6 +1144,7 @@ def publish_clips(req: PublishClipsRequest, request: Request) -> dict[str, Any]:
                             metadata=meta,
                             privacy_status=req.privacy_status,
                             use_nocaptions=req.use_nocaptions,
+                            account_id=req.youtube_account_id,
                         )
                         published["youtube_url"] = out["url"]
                         clip_res["platforms"]["youtube"] = {"ok": True, **out}

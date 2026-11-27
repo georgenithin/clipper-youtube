@@ -201,8 +201,9 @@ export function youtubeConnectUrl(): string {
   return `${API_BASE}/api/auth/youtube/start${qs}`;
 }
 
-export function disconnectYoutube(): Promise<{ disconnected: boolean }> {
-  return apiFetch("/api/auth/youtube/disconnect", { method: "POST" });
+export function disconnectYoutube(accountId?: string): Promise<{ disconnected: boolean }> {
+  const qs = accountId ? `?account_id=${encodeURIComponent(accountId)}` : "";
+  return apiFetch(`/api/auth/youtube/disconnect${qs}`, { method: "POST" });
 }
 
 export function saveInstagramConfig(
@@ -220,6 +221,7 @@ export function publishClips(payload: {
   platforms: ("youtube" | "instagram")[];
   privacy_status: "private" | "unlisted" | "public";
   use_nocaptions: boolean;
+  youtube_account_id?: string;
 }): Promise<{ results: PublishClipResult[] }> {
   return apiFetch("/api/publish", {
     method: "POST",

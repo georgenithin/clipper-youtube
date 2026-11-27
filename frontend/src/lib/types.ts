@@ -131,11 +131,18 @@ export interface SSEEvent {
   transfer_mode?: "download" | "upload" | null;
 }
 
+export interface YouTubeAccount {
+  id: string;
+  channel_title: string;
+  thumbnail: string;
+}
+
 export interface PublishStatus {
   youtube: {
     oauth_configured: boolean;
     connected: boolean;
     channel_title: string | null;
+    accounts: YouTubeAccount[];
     redirect_uri: string;
   };
   instagram: {

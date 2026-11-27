@@ -30,6 +30,7 @@ export function PublishModal({ clips, open, onClose, onPublished }: PublishModal
 
   const [status, setStatus] = useState<PublishStatus | null>(null);
   const [postYoutube, setPostYoutube] = useState(true);
+  const [selectedYtId, setSelectedYtId] = useState<string>("");
   const [postInstagram, setPostInstagram] = useState(false);
   const [privacy, setPrivacy] = useState<"private" | "unlisted" | "public">("private");
   const [useNoCaptions, setUseNoCaptions] = useState(false);
@@ -45,6 +46,7 @@ export function PublishModal({ clips, open, onClose, onPublished }: PublishModal
         .then((st) => {
           setStatus(st);
           setPostYoutube(st.youtube.connected);
+          setSelectedYtId(st.youtube.accounts?.[0]?.id || "");
           setPostInstagram(st.instagram.connected);
         })
         .catch(() => setStatus(null));
@@ -99,6 +101,7 @@ export function PublishModal({ clips, open, onClose, onPublished }: PublishModal
         platforms,
         privacy_status: privacy,
         use_nocaptions: useNoCaptions,
+        youtube_account_id: selectedYtId || undefined,
       });
       setResults(res.results);
       const okCount = res.results.filter((r) => r.ok).length;
@@ -194,20 +197,41 @@ export function PublishModal({ clips, open, onClose, onPublished }: PublishModal
             </div>
 
             {postYoutube && status?.youtube.connected && (
-              <div className="flex items-center justify-between gap-3 pt-1 border-t border-white/[0.06]">
-                <label htmlFor="pub-privacy" className="text-xs text-slate-400">
-                  Visibility
-                </label>
-                <select
-                  id="pub-privacy"
-                  value={privacy}
-                  onChange={(e) => setPrivacy(e.target.value as "private" | "unlisted" | "public")}
-                  className="rounded-lg border border-white/10 bg-[#131620] px-2.5 py-1 text-xs text-white"
-                >
-                  <option value="private">Private (review in Studio first)</option>
-                  <option value="unlisted">Unlisted</option>
-                  <option value="public">Public (live immediately)</option>
-                </select>
+              <div className="space-y-2.5 pt-2 border-t border-white/[0.06]">
+                {status.youtube.accounts && status.youtube.accounts.length > 0 && (
+                  <div className="flex items-center justify-between gap-3">
+                    <label htmlFor="pub-yt-channel" className="text-xs text-slate-400">
+                      Channel
+                    </label>
+                    <select
+                      id="pub-yt-channel"
+                      value={selectedYtId}
+                      onChange={(e) => setSelectedYtId(e.target.value)}
+                      className="rounded-lg border border-white/10 bg-[#131620] px-2.5 py-1 text-xs text-white max-w-[230px]"
+                    >
+                      {status.youtube.accounts.map((acc) => (
+                        <option key={acc.id} value={acc.id}>
+                          {acc.channel_title}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                <div className="flex items-center justify-between gap-3">
+                  <label htmlFor="pub-privacy" className="text-xs text-slate-400">
+                    Visibility
+                  </label>
+                  <select
+                    id="pub-privacy"
+                    value={privacy}
+                    onChange={(e) => setPrivacy(e.target.value as "private" | "unlisted" | "public")}
+                    className="rounded-lg border border-white/10 bg-[#131620] px-2.5 py-1 text-xs text-white"
+                  >
+                    <option value="private">Private (review in Studio first)</option>
+                    <option value="unlisted">Unlisted</option>
+                    <option value="public">Public (live immediately)</option>
+                  </select>
+                </div>
               </div>
             )}
           </div>

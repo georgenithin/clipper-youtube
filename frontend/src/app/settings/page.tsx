@@ -324,37 +324,25 @@ export default function SettingsPage() {
           </p>
         </div>
 
-        {/* YouTube OAuth */}
+        {/* YouTube OAuth (Multi-Channel) */}
         <div className="rounded-xl border border-white/[0.07] bg-[#0b0d14] p-4 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <Youtube className="h-4 w-4 text-rose-500" />
-              <span className="text-sm font-semibold text-white">YouTube Shorts</span>
-            </div>
-            {pubStatus?.youtube.connected ? (
-              <div className="flex items-center gap-2">
-                <span className="rounded-full bg-emerald-500/15 px-2.5 py-0.5 text-xs font-medium text-emerald-300">
-                  {pubStatus.youtube.channel_title || "Connected"}
+              <span className="text-sm font-semibold text-white">YouTube Channels</span>
+              {pubStatus?.youtube.accounts && pubStatus.youtube.accounts.length > 0 && (
+                <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
+                  {pubStatus.youtube.accounts.length} connected
                 </span>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    await disconnectYoutube();
-                    toast("Disconnected YouTube account", "info");
-                    load();
-                  }}
-                  className="rounded-lg border border-white/10 px-2.5 py-1 text-xs text-slate-300 hover:bg-white/10"
-                >
-                  Disconnect
-                </button>
-              </div>
-            ) : pubStatus?.youtube.oauth_configured ? (
+              )}
+            </div>
+            {pubStatus?.youtube.oauth_configured ? (
               <a
                 href={youtubeConnectUrl()}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-rose-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-400"
               >
                 <Youtube className="h-3.5 w-3.5" />
-                Connect YouTube Account
+                {pubStatus.youtube.connected ? "+ Add Another Channel" : "Connect YouTube Account"}
               </a>
             ) : (
               <span className="rounded-full bg-amber-500/15 px-2.5 py-0.5 text-xs text-amber-300">
@@ -362,6 +350,38 @@ export default function SettingsPage() {
               </span>
             )}
           </div>
+
+          {pubStatus?.youtube.accounts && pubStatus.youtube.accounts.length > 0 && (
+            <ul className="space-y-2 pt-1">
+              {pubStatus.youtube.accounts.map((acc) => (
+                <li
+                  key={acc.id}
+                  className="flex items-center justify-between gap-3 rounded-lg border border-white/[0.06] bg-[#121520] px-3 py-2"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    {acc.thumbnail ? (
+                      <img src={acc.thumbnail} alt="" className="h-6 w-6 rounded-full shrink-0" />
+                    ) : (
+                      <Youtube className="h-4 w-4 text-rose-400 shrink-0" />
+                    )}
+                    <span className="truncate text-xs font-medium text-white">{acc.channel_title}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await disconnectYoutube(acc.id);
+                      toast(`Removed ${acc.channel_title}`, "info");
+                      load();
+                    }}
+                    className="rounded-md border border-white/10 px-2 py-1 text-[11px] text-slate-300 hover:bg-rose-500/15 hover:text-rose-300 shrink-0"
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
           {pubStatus?.youtube.redirect_uri && (
             <p className="text-[11px] text-slate-500 break-all">
               Authorized Redirect URI:{" "}
